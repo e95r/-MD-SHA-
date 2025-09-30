@@ -457,6 +457,10 @@ private:
     }
 };
 
+constexpr std::array<std::uint8_t, 256> Streebog256::pi;
+constexpr std::array<std::uint8_t, 64> Streebog256::tau;
+constexpr std::array<std::uint64_t, 64> Streebog256::linear;
+
 void show_menu() {
     std::cout << "Выберите алгоритм хеширования:\n";
     std::cout << "1. MD5\n";
@@ -498,7 +502,9 @@ int main() {
         std::string input;
         std::getline(std::cin, input);
 
-        const auto& [title, func] = it->second;
+        const auto& algorithm = it->second;
+        const std::string& title = std::get<0>(algorithm);
+        const auto& func = std::get<1>(algorithm);
         try {
             std::string digest = func(input);
             std::cout << title << ": " << digest << "\n\n";
