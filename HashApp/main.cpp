@@ -1,20 +1,20 @@
+#define NOMINMAX
+#include <windows.h>
+#include <commdlg.h>
+
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
+#include <algorithm>
+#include <fstream>
 #include <functional>
 #include <iomanip>
-#include <iostream>
-#include <limits>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <tuple>
 #include <vector>
-#include <fstream>
-#include <algorithm>
-#include <cctype>
-#include <map>
-#include <iterator>
 
 namespace utils {
 std::string bytes_to_hex(const std::vector<std::uint8_t>& bytes) {
@@ -465,203 +465,379 @@ constexpr std::array<std::uint8_t, 256> Streebog256::pi;
 constexpr std::array<std::uint8_t, 64> Streebog256::tau;
 constexpr std::array<std::uint64_t, 64> Streebog256::linear;
 
-std::string make_preview(const std::string& text, std::size_t max_length = 60) {
-    if (text.empty()) {
-        return "";
-    }
+namespace {
 
-    std::string preview;
-    preview.reserve(std::min(text.size(), max_length));
-    std::size_t count = 0;
-    for (unsigned char ch : text) {
-        if (count >= max_length) {
-            break;
-        }
-        if (ch == '\n' || ch == '\r' || ch == '\t') {
-            preview.push_back(' ');
-        } else if (std::isprint(ch)) {
-            preview.push_back(static_cast<char>(ch));
-        } else {
-            preview += "?";
-        }
-        ++count;
-    }
+struct AlgorithmEntry {
+    std::wstring title;
+    std::function<std::string(const std::string&)> func;
+};
 
-    if (text.size() > max_length) {
-        preview += "...";
-    }
-
-    return preview;
+const std::vector<AlgorithmEntry>& get_algorithms() {
+    static const std::vector<AlgorithmEntry> algorithms = {
+        {L"MD5", MD5::hash},
+        {L"SHA-1", SHA1::hash},
+        {L"ГОСТ Р 34.11-2012 (256 бит)", Streebog256::hash}
+    };
+    return algorithms;
 }
 
-std::string load_file_contents(const std::string& path) {
+std::string wide_to_utf8(const std::wstring& input) {
+    if (input.empty()) {
+        return {};
+    }
+    const int required = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), nullptr, 0, nullptr, nullptr);
+    if (required <= 0) {
+        return {};
+    }
+    std::string result(static_cast<std::size_t>(required), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(), required, nullptr, nullptr);
+    return result;
+}
+
+std::wstring utf8_to_wide(const std::string& input) {
+    if (input.empty()) {
+        return {};
+    }
+    const int required = MultiByteToWideChar(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), nullptr, 0);
+    if (required <= 0) {
+        return {};
+    }
+    std::wstring result(static_cast<std::size_t>(required), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(), required);
+    return result;
+}
+
+bool load_file_contents(const std::wstring& path, std::string& data) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
-        throw std::runtime_error("Не удалось открыть файл: " + path);
+        return false;
     }
 
-    std::string data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
     if (!file.good() && !file.eof()) {
-        throw std::runtime_error("Ошибка чтения файла: " + path);
+        return false;
     }
-    return data;
+    data = buffer.str();
+    return true;
 }
 
-using AlgorithmMap = std::map<int, std::tuple<std::string, std::function<std::string(const std::string&)>>>;
+struct Controls {
+    HWND algorithmLabel = nullptr;
+    HWND algorithmCombo = nullptr;
+    HWND chooseFileButton = nullptr;
+    HWND clearFileButton = nullptr;
+    HWND filePathEdit = nullptr;
+    HWND textLabel = nullptr;
+    HWND inputEdit = nullptr;
+    HWND hashButton = nullptr;
+    HWND resultLabel = nullptr;
+    HWND outputEdit = nullptr;
+    HWND saveButton = nullptr;
+};
 
-void show_status(const AlgorithmMap& algorithms,
-                 int selected_algorithm,
-                 bool data_available,
-                 bool data_from_file,
-                 const std::string& data_preview,
-                 const std::string& file_path,
-                 std::size_t data_size) {
-    std::cout << "==============================\n";
-    std::cout << "Текущий алгоритм: ";
-    if (selected_algorithm == 0) {
-        std::cout << "не выбран";
+struct AppState {
+    bool use_file = false;
+    std::wstring file_path;
+    std::string file_data;
+    std::string last_digest;
+    int last_algorithm_index = -1;
+};
+
+Controls g_controls;
+AppState g_app_state;
+HFONT g_ui_font = nullptr;
+
+void apply_font(HWND control) {
+    if (g_ui_font != nullptr && control != nullptr) {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
+    }
+}
+
+std::string get_edit_text_utf8(HWND edit) {
+    const int length = GetWindowTextLengthW(edit);
+    if (length <= 0) {
+        return {};
+    }
+    std::wstring buffer;
+    buffer.resize(static_cast<std::size_t>(length) + 1);
+    GetWindowTextW(edit, buffer.data(), length + 1);
+    buffer.resize(std::wcslen(buffer.c_str()));
+    return wide_to_utf8(buffer);
+}
+
+void update_file_path_display() {
+    if (g_app_state.use_file && !g_app_state.file_path.empty()) {
+        SetWindowTextW(g_controls.filePathEdit, g_app_state.file_path.c_str());
     } else {
-        const auto it = algorithms.find(selected_algorithm);
-        if (it != algorithms.end()) {
-            std::cout << std::get<0>(it->second);
-        } else {
-            std::cout << "неизвестно";
-        }
+        SetWindowTextW(g_controls.filePathEdit, L"Файл не выбран");
     }
-    std::cout << "\n";
-
-    std::cout << "Источник данных: ";
-    if (!data_available) {
-        std::cout << "не задан";
-    } else if (data_from_file) {
-        std::cout << "файл (" << file_path << ", " << data_size << " байт)";
-    } else {
-        std::cout << "текст (" << data_size << " символов)";
-        if (!data_preview.empty()) {
-            std::cout << "\nПредпросмотр: " << data_preview;
-        }
-    }
-    std::cout << "\n==============================\n";
 }
 
-void show_menu() {
-    std::cout << "Выберите действие:\n";
-    std::cout << "1. Выбрать алгоритм\n";
-    std::cout << "2. Ввести текст\n";
-    std::cout << "3. Загрузить файл\n";
-    std::cout << "4. Выполнить хеширование\n";
-    std::cout << "0. Выход\n";
-    std::cout << "Введите номер действия: ";
+void clear_file_selection() {
+    g_app_state.use_file = false;
+    g_app_state.file_path.clear();
+    g_app_state.file_data.clear();
+    update_file_path_display();
 }
 
-int main() {
-    AlgorithmMap algorithms = {
-        {1, {"MD5", MD5::hash}},
-        {2, {"SHA-1", SHA1::hash}},
-        {3, {"ГОСТ Р 34.11-2012 (256 бит)", Streebog256::hash}}
-    };
+void layout_controls(HWND hwnd) {
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    const int width = rc.right - rc.left;
+    const int height = rc.bottom - rc.top;
 
-    int selected_algorithm = 0;
+    const int margin = 16;
+    const int labelHeight = 20;
+    const int editHeight = 24;
+    const int buttonHeight = 30;
+    const int labelWidth = 110;
+
+    int y = margin;
+
+    MoveWindow(g_controls.algorithmLabel, margin, y, labelWidth, labelHeight, TRUE);
+    MoveWindow(g_controls.algorithmCombo, margin + labelWidth + 8, y - 4, std::max(100, width - (margin * 2 + labelWidth + 8)), editHeight + 8, TRUE);
+    y += editHeight + 12;
+
+    MoveWindow(g_controls.chooseFileButton, margin, y, 170, buttonHeight, TRUE);
+    MoveWindow(g_controls.clearFileButton, margin + 170 + 8, y, 170, buttonHeight, TRUE);
+    y += buttonHeight + 8;
+
+    MoveWindow(g_controls.filePathEdit, margin, y, std::max(100, width - margin * 2), editHeight, TRUE);
+    y += editHeight + 16;
+
+    MoveWindow(g_controls.textLabel, margin, y, std::max(100, width - margin * 2), labelHeight, TRUE);
+    y += labelHeight + 4;
+
+    const int remainingHeight = std::max(0, height - y - margin - 12 - (buttonHeight + 12) - (labelHeight + 4) - (buttonHeight + 12));
+    const int resultHeight = std::max(80, remainingHeight / 3);
+    const int textHeight = std::max(80, remainingHeight - resultHeight);
+
+    MoveWindow(g_controls.inputEdit, margin, y, std::max(100, width - margin * 2), textHeight, TRUE);
+    y += textHeight + 12;
+
+    MoveWindow(g_controls.hashButton, margin, y, 200, buttonHeight, TRUE);
+    y += buttonHeight + 12;
+
+    MoveWindow(g_controls.resultLabel, margin, y, std::max(100, width - margin * 2), labelHeight, TRUE);
+    y += labelHeight + 4;
+
+    MoveWindow(g_controls.outputEdit, margin, y, std::max(100, width - margin * 2), resultHeight, TRUE);
+    y += resultHeight + 12;
+
+    MoveWindow(g_controls.saveButton, margin, y, 240, buttonHeight, TRUE);
+}
+
+bool select_file(HWND hwnd) {
+    wchar_t buffer[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"Все файлы\0*.*\0";
+    ofn.lpstrFile = buffer;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(buffer));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+
     std::string data;
-    bool data_available = false;
-    bool data_from_file = false;
-    std::string current_file_path;
-
-    while (true) {
-        const std::string preview = (data_available && !data_from_file) ? make_preview(data) : std::string();
-        show_status(algorithms, selected_algorithm, data_available, data_from_file, preview, current_file_path, data.size());
-        show_menu();
-
-        int choice = 0;
-        if (!(std::cin >> choice)) {
-            std::cerr << "Некорректный ввод." << std::endl;
-            return 1;
-        }
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-
-        if (choice == 0) {
-            std::cout << "Выход из программы." << std::endl;
-            break;
-        }
-
-        switch (choice) {
-            case 1: {
-                std::cout << "Доступные алгоритмы:\n";
-                for (const auto& [id, info] : algorithms) {
-                    std::cout << "  " << id << ". " << std::get<0>(info) << '\n';
-                }
-                std::cout << "Введите номер алгоритма: ";
-                int algorithm_choice = 0;
-                if (!(std::cin >> algorithm_choice)) {
-                    std::cerr << "Некорректный ввод.\n";
-                    return 1;
-                }
-                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-
-                if (algorithms.find(algorithm_choice) != algorithms.end()) {
-                    selected_algorithm = algorithm_choice;
-                    std::cout << "Алгоритм установлен.\n\n";
-                } else {
-                    std::cout << "Алгоритм с таким номером не найден.\n\n";
-                }
-                break;
-            }
-            case 2: {
-                std::cout << "Введите текст для хеширования:\n";
-                std::string input;
-                std::getline(std::cin, input);
-                data = input;
-                data_available = true;
-                data_from_file = false;
-                current_file_path.clear();
-                std::cout << "Текст добавлен.\n\n";
-                break;
-            }
-            case 3: {
-                std::cout << "Укажите путь к файлу: ";
-                std::string path;
-                std::getline(std::cin, path);
-                try {
-                    data = load_file_contents(path);
-                    data_available = true;
-                    data_from_file = true;
-                    current_file_path = path;
-                    std::cout << "Файл успешно загружен.\n\n";
-                } catch (const std::exception& ex) {
-                    std::cerr << ex.what() << "\n\n";
-                }
-                break;
-            }
-            case 4: {
-                if (selected_algorithm == 0) {
-                    std::cout << "Сначала выберите алгоритм.\n\n";
-                    break;
-                }
-                if (!data_available) {
-                    std::cout << "Нет данных для хеширования.\n\n";
-                    break;
-                }
-
-                const auto it = algorithms.find(selected_algorithm);
-                if (it == algorithms.end()) {
-                    std::cerr << "Выбранный алгоритм недоступен.\n\n";
-                    break;
-                }
-
-                const auto& [title, func] = it->second;
-                try {
-                    std::string digest = func(data);
-                    std::cout << title << ": " << digest << "\n\n";
-                } catch (const std::exception& ex) {
-                    std::cerr << "Ошибка: " << ex.what() << "\n\n";
-                }
-                break;
-            }
-            default:
-                std::cout << "Неизвестная команда. Попробуйте снова.\n\n";
-                break;
-        }
+    if (!load_file_contents(buffer, data)) {
+        MessageBoxW(hwnd, L"Не удалось прочитать файл.", L"Ошибка", MB_ICONERROR | MB_OK);
+        return false;
     }
 
-    return 0;
+    g_app_state.use_file = true;
+    g_app_state.file_path = buffer;
+    g_app_state.file_data = std::move(data);
+    update_file_path_display();
+    return true;
+}
+
+void show_error(HWND hwnd, const std::wstring& message) {
+    MessageBoxW(hwnd, message.c_str(), L"Ошибка", MB_ICONERROR | MB_OK);
+}
+
+void compute_hash(HWND hwnd) {
+    const auto& algorithms = get_algorithms();
+    const LRESULT selection = SendMessageW(g_controls.algorithmCombo, CB_GETCURSEL, 0, 0);
+    if (selection == CB_ERR) {
+        show_error(hwnd, L"Выберите алгоритм хеширования.");
+        return;
+    }
+
+    std::string data;
+    if (g_app_state.use_file) {
+        data = g_app_state.file_data;
+    } else {
+        data = get_edit_text_utf8(g_controls.inputEdit);
+    }
+
+    try {
+        const std::string digest = algorithms[static_cast<std::size_t>(selection)].func(data);
+        g_app_state.last_digest = digest;
+        g_app_state.last_algorithm_index = static_cast<int>(selection);
+        const std::wstring result = algorithms[static_cast<std::size_t>(selection)].title + L": " + utf8_to_wide(digest);
+        SetWindowTextW(g_controls.outputEdit, result.c_str());
+    } catch (const std::exception& ex) {
+        show_error(hwnd, utf8_to_wide(std::string("Ошибка: ") + ex.what()));
+    }
+}
+
+void save_digest(HWND hwnd) {
+    if (g_app_state.last_digest.empty() || g_app_state.last_algorithm_index < 0) {
+        MessageBoxW(hwnd, L"Сначала выполните хеширование.", L"Сохранение невозможно", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+
+    wchar_t buffer[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"Файлы хеша (*.hash)\0*.hash\0Все файлы\0*.*\0";
+    ofn.lpstrFile = buffer;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(buffer));
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    ofn.lpstrDefExt = L"hash";
+
+    if (!GetSaveFileNameW(&ofn)) {
+        return;
+    }
+
+    std::ofstream out(buffer, std::ios::binary);
+    if (!out) {
+        show_error(hwnd, L"Не удалось открыть файл для записи.");
+        return;
+    }
+
+    const auto& algorithms = get_algorithms();
+    const std::string title_utf8 = wide_to_utf8(algorithms[static_cast<std::size_t>(g_app_state.last_algorithm_index)].title);
+    std::string content = title_utf8 + "\r\n" + g_app_state.last_digest + "\r\n";
+    out.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!out) {
+        show_error(hwnd, L"Не удалось сохранить файл.");
+        return;
+    }
+
+    MessageBoxW(hwnd, L"Результат успешно сохранен.", L"Готово", MB_ICONINFORMATION | MB_OK);
+}
+
+} // namespace
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+        case WM_CREATE: {
+            g_ui_font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+            g_controls.algorithmLabel = CreateWindowExW(0, L"STATIC", L"Алгоритм:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+            g_controls.algorithmCombo = CreateWindowExW(0, L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1001)), nullptr, nullptr);
+            g_controls.chooseFileButton = CreateWindowExW(0, L"BUTTON", L"Выбрать файл", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1002)), nullptr, nullptr);
+            g_controls.clearFileButton = CreateWindowExW(0, L"BUTTON", L"Очистить выбор", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1003)), nullptr, nullptr);
+            g_controls.filePathEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1004)), nullptr, nullptr);
+            g_controls.textLabel = CreateWindowExW(0, L"STATIC", L"Текст для хеширования:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+            g_controls.inputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1005)), nullptr, nullptr);
+            g_controls.hashButton = CreateWindowExW(0, L"BUTTON", L"Выполнить хеширование", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1006)), nullptr, nullptr);
+            g_controls.resultLabel = CreateWindowExW(0, L"STATIC", L"Результат:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+            g_controls.outputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | ES_READONLY, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1007)), nullptr, nullptr);
+            g_controls.saveButton = CreateWindowExW(0, L"BUTTON", L"Сохранить результат в файл", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1008)), nullptr, nullptr);
+
+            apply_font(g_controls.algorithmLabel);
+            apply_font(g_controls.algorithmCombo);
+            apply_font(g_controls.chooseFileButton);
+            apply_font(g_controls.clearFileButton);
+            apply_font(g_controls.filePathEdit);
+            apply_font(g_controls.textLabel);
+            apply_font(g_controls.inputEdit);
+            apply_font(g_controls.hashButton);
+            apply_font(g_controls.resultLabel);
+            apply_font(g_controls.outputEdit);
+            apply_font(g_controls.saveButton);
+
+            const auto& algorithms = get_algorithms();
+            for (const auto& algorithm : algorithms) {
+                SendMessageW(g_controls.algorithmCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(algorithm.title.c_str()));
+            }
+            if (!algorithms.empty()) {
+                SendMessageW(g_controls.algorithmCombo, CB_SETCURSEL, 0, 0);
+            }
+
+            clear_file_selection();
+            layout_controls(hwnd);
+            return 0;
+        }
+        case WM_SIZE:
+            layout_controls(hwnd);
+            return 0;
+        case WM_GETMINMAXINFO: {
+            auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
+            info->ptMinTrackSize.x = 720;
+            info->ptMinTrackSize.y = 520;
+            return 0;
+        }
+        case WM_COMMAND: {
+            const int control_id = LOWORD(wParam);
+            const int notification = HIWORD(wParam);
+            if (notification == BN_CLICKED) {
+                switch (control_id) {
+                    case 1002:
+                        select_file(hwnd);
+                        break;
+                    case 1003:
+                        clear_file_selection();
+                        break;
+                    case 1006:
+                        compute_hash(hwnd);
+                        break;
+                    case 1008:
+                        save_digest(hwnd);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            return 0;
+        }
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+    const wchar_t class_name[] = L"HashAppWindow";
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = class_name;
+
+    if (!RegisterClassExW(&wc)) {
+        MessageBoxW(nullptr, L"Не удалось зарегистрировать окно.", L"Критическая ошибка", MB_ICONERROR | MB_OK);
+        return 0;
+    }
+
+    HWND hwnd = CreateWindowExW(0, class_name, L"Хеширование данных", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 640, nullptr, nullptr, hInstance, nullptr);
+    if (!hwnd) {
+        MessageBoxW(nullptr, L"Не удалось создать главное окно.", L"Критическая ошибка", MB_ICONERROR | MB_OK);
+        return 0;
+    }
+
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    return static_cast<int>(msg.wParam);
 }
