@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace utils {
@@ -472,40 +473,54 @@ struct AlgorithmEntry {
     std::function<std::string(const std::string&)> func;
 };
 
+std::string wide_to_utf8(std::wstring_view input);
+std::wstring utf8_to_wide(std::string_view input);
+#if defined(__cpp_char8_t)
+std::wstring utf8_to_wide(std::u8string_view input);
+#endif
+
 const std::vector<AlgorithmEntry>& get_algorithms() {
-    static const std::vector<AlgorithmEntry> algorithms = {
-        {L"MD5", MD5::hash},
-        {L"SHA-1", SHA1::hash},
-        {L"ГОСТ Р 34.11-2012 (256 бит)", Streebog256::hash}
-    };
+    static const std::vector<AlgorithmEntry> algorithms = [] {
+        std::vector<AlgorithmEntry> list;
+        list.push_back({L"MD5", MD5::hash});
+        list.push_back({L"SHA-1", SHA1::hash});
+        list.push_back({utf8_to_wide(u8"ГОСТ Р 34.11-2012 (256 бит)"), Streebog256::hash});
+        return list;
+    }();
     return algorithms;
 }
 
-std::string wide_to_utf8(const std::wstring& input) {
+std::string wide_to_utf8(std::wstring_view input) {
     if (input.empty()) {
         return {};
     }
-    const int required = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), nullptr, 0, nullptr, nullptr);
+    const int required = WideCharToMultiByte(CP_UTF8, 0, input.data(), static_cast<int>(input.size()), nullptr, 0, nullptr, nullptr);
     if (required <= 0) {
         return {};
     }
     std::string result(static_cast<std::size_t>(required), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(), required, nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, input.data(), static_cast<int>(input.size()), result.data(), required, nullptr, nullptr);
     return result;
 }
 
-std::wstring utf8_to_wide(const std::string& input) {
+std::wstring utf8_to_wide(std::string_view input) {
     if (input.empty()) {
         return {};
     }
-    const int required = MultiByteToWideChar(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), nullptr, 0);
+    const int required = MultiByteToWideChar(CP_UTF8, 0, input.data(), static_cast<int>(input.size()), nullptr, 0);
     if (required <= 0) {
         return {};
     }
     std::wstring result(static_cast<std::size_t>(required), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(), required);
+    MultiByteToWideChar(CP_UTF8, 0, input.data(), static_cast<int>(input.size()), result.data(), required);
     return result;
 }
+
+#if defined(__cpp_char8_t)
+std::wstring utf8_to_wide(std::u8string_view input) {
+    return utf8_to_wide(std::string_view(reinterpret_cast<const char*>(input.data()), input.size()));
+}
+#endif
 
 bool load_file_contents(const std::wstring& path, std::string& data) {
     std::ifstream file(path, std::ios::binary);
@@ -570,7 +585,7 @@ void update_file_path_display() {
     if (g_app_state.use_file && !g_app_state.file_path.empty()) {
         SetWindowTextW(g_controls.filePathEdit, g_app_state.file_path.c_str());
     } else {
-        SetWindowTextW(g_controls.filePathEdit, L"Файл не выбран");
+        SetWindowTextW(g_controls.filePathEdit, utf8_to_wide(u8"Файл не выбран").c_str());
     }
 }
 
@@ -633,7 +648,8 @@ bool select_file(HWND hwnd) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"Все файлы\0*.*\0";
+    const std::wstring filter = utf8_to_wide(u8"Все файлы") + std::wstring(1, L'\0') + utf8_to_wide(u8"*.*") + std::wstring(1, L'\0');
+    ofn.lpstrFilter = filter.c_str();
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = static_cast<DWORD>(std::size(buffer));
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
@@ -644,7 +660,7 @@ bool select_file(HWND hwnd) {
 
     std::string data;
     if (!load_file_contents(buffer, data)) {
-        MessageBoxW(hwnd, L"Не удалось прочитать файл.", L"Ошибка", MB_ICONERROR | MB_OK);
+        MessageBoxW(hwnd, utf8_to_wide(u8"Не удалось прочитать файл.").c_str(), utf8_to_wide(u8"Ошибка").c_str(), MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -656,14 +672,14 @@ bool select_file(HWND hwnd) {
 }
 
 void show_error(HWND hwnd, const std::wstring& message) {
-    MessageBoxW(hwnd, message.c_str(), L"Ошибка", MB_ICONERROR | MB_OK);
+    MessageBoxW(hwnd, message.c_str(), utf8_to_wide(u8"Ошибка").c_str(), MB_ICONERROR | MB_OK);
 }
 
 void compute_hash(HWND hwnd) {
     const auto& algorithms = get_algorithms();
     const LRESULT selection = SendMessageW(g_controls.algorithmCombo, CB_GETCURSEL, 0, 0);
     if (selection == CB_ERR) {
-        show_error(hwnd, L"Выберите алгоритм хеширования.");
+        show_error(hwnd, utf8_to_wide(u8"Выберите алгоритм хеширования."));
         return;
     }
 
@@ -687,7 +703,8 @@ void compute_hash(HWND hwnd) {
 
 void save_digest(HWND hwnd) {
     if (g_app_state.last_digest.empty() || g_app_state.last_algorithm_index < 0) {
-        MessageBoxW(hwnd, L"Сначала выполните хеширование.", L"Сохранение невозможно", MB_ICONINFORMATION | MB_OK);
+        MessageBoxW(hwnd, utf8_to_wide(u8"Сначала выполните хеширование.").c_str(),
+                    utf8_to_wide(u8"Сохранение невозможно").c_str(), MB_ICONINFORMATION | MB_OK);
         return;
     }
 
@@ -695,7 +712,11 @@ void save_digest(HWND hwnd) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"Файлы хеша (*.hash)\0*.hash\0Все файлы\0*.*\0";
+    const std::wstring save_filter = utf8_to_wide(u8"Файлы хеша (*.hash)") + std::wstring(1, L'\0') +
+                                     utf8_to_wide(u8"*.hash") + std::wstring(1, L'\0') +
+                                     utf8_to_wide(u8"Все файлы") + std::wstring(1, L'\0') +
+                                     utf8_to_wide(u8"*.*") + std::wstring(1, L'\0');
+    ofn.lpstrFilter = save_filter.c_str();
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = static_cast<DWORD>(std::size(buffer));
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
@@ -707,7 +728,7 @@ void save_digest(HWND hwnd) {
 
     std::ofstream out(buffer, std::ios::binary);
     if (!out) {
-        show_error(hwnd, L"Не удалось открыть файл для записи.");
+        show_error(hwnd, utf8_to_wide(u8"Не удалось открыть файл для записи."));
         return;
     }
 
@@ -716,11 +737,11 @@ void save_digest(HWND hwnd) {
     std::string content = title_utf8 + "\r\n" + g_app_state.last_digest + "\r\n";
     out.write(content.data(), static_cast<std::streamsize>(content.size()));
     if (!out) {
-        show_error(hwnd, L"Не удалось сохранить файл.");
+        show_error(hwnd, utf8_to_wide(u8"Не удалось сохранить файл."));
         return;
     }
 
-    MessageBoxW(hwnd, L"Результат успешно сохранен.", L"Готово", MB_ICONINFORMATION | MB_OK);
+    MessageBoxW(hwnd, utf8_to_wide(u8"Результат успешно сохранен.").c_str(), utf8_to_wide(u8"Готово").c_str(), MB_ICONINFORMATION | MB_OK);
 }
 
 } // namespace
@@ -730,17 +751,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_CREATE: {
             g_ui_font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
-            g_controls.algorithmLabel = CreateWindowExW(0, L"STATIC", L"Алгоритм:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+            g_controls.algorithmLabel = CreateWindowExW(0, L"STATIC", utf8_to_wide(u8"Алгоритм:").c_str(), WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
             g_controls.algorithmCombo = CreateWindowExW(0, L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1001)), nullptr, nullptr);
-            g_controls.chooseFileButton = CreateWindowExW(0, L"BUTTON", L"Выбрать файл", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1002)), nullptr, nullptr);
-            g_controls.clearFileButton = CreateWindowExW(0, L"BUTTON", L"Очистить выбор", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1003)), nullptr, nullptr);
+            g_controls.chooseFileButton = CreateWindowExW(0, L"BUTTON", utf8_to_wide(u8"Выбрать файл").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1002)), nullptr, nullptr);
+            g_controls.clearFileButton = CreateWindowExW(0, L"BUTTON", utf8_to_wide(u8"Очистить выбор").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1003)), nullptr, nullptr);
             g_controls.filePathEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1004)), nullptr, nullptr);
-            g_controls.textLabel = CreateWindowExW(0, L"STATIC", L"Текст для хеширования:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+            g_controls.textLabel = CreateWindowExW(0, L"STATIC", utf8_to_wide(u8"Текст для хеширования:").c_str(), WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
             g_controls.inputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1005)), nullptr, nullptr);
-            g_controls.hashButton = CreateWindowExW(0, L"BUTTON", L"Выполнить хеширование", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1006)), nullptr, nullptr);
-            g_controls.resultLabel = CreateWindowExW(0, L"STATIC", L"Результат:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+            g_controls.hashButton = CreateWindowExW(0, L"BUTTON", utf8_to_wide(u8"Выполнить хеширование").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1006)), nullptr, nullptr);
+            g_controls.resultLabel = CreateWindowExW(0, L"STATIC", utf8_to_wide(u8"Результат:").c_str(), WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
             g_controls.outputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | ES_READONLY, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1007)), nullptr, nullptr);
-            g_controls.saveButton = CreateWindowExW(0, L"BUTTON", L"Сохранить результат в файл", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1008)), nullptr, nullptr);
+            g_controls.saveButton = CreateWindowExW(0, L"BUTTON", utf8_to_wide(u8"Сохранить результат в файл").c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1008)), nullptr, nullptr);
 
             apply_font(g_controls.algorithmLabel);
             apply_font(g_controls.algorithmCombo);
@@ -820,13 +841,13 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.lpszClassName = class_name;
 
     if (!RegisterClassExW(&wc)) {
-        MessageBoxW(nullptr, L"Не удалось зарегистрировать окно.", L"Критическая ошибка", MB_ICONERROR | MB_OK);
+        MessageBoxW(nullptr, utf8_to_wide(u8"Не удалось зарегистрировать окно.").c_str(), utf8_to_wide(u8"Критическая ошибка").c_str(), MB_ICONERROR | MB_OK);
         return 0;
     }
 
-    HWND hwnd = CreateWindowExW(0, class_name, L"Хеширование данных", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 640, nullptr, nullptr, hInstance, nullptr);
+    HWND hwnd = CreateWindowExW(0, class_name, utf8_to_wide(u8"Хеширование данных").c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 640, nullptr, nullptr, hInstance, nullptr);
     if (!hwnd) {
-        MessageBoxW(nullptr, L"Не удалось создать главное окно.", L"Критическая ошибка", MB_ICONERROR | MB_OK);
+        MessageBoxW(nullptr, utf8_to_wide(u8"Не удалось создать главное окно.").c_str(), utf8_to_wide(u8"Критическая ошибка").c_str(), MB_ICONERROR | MB_OK);
         return 0;
     }
 
