@@ -9,8 +9,12 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
-#include <unordered_map>
 #include <vector>
+#include <fstream>
+#include <algorithm>
+#include <cctype>
+#include <map>
+#include <iterator>
 
 namespace utils {
 std::string bytes_to_hex(const std::vector<std::uint8_t>& bytes) {
@@ -461,23 +465,111 @@ constexpr std::array<std::uint8_t, 256> Streebog256::pi;
 constexpr std::array<std::uint8_t, 64> Streebog256::tau;
 constexpr std::array<std::uint64_t, 64> Streebog256::linear;
 
+std::string make_preview(const std::string& text, std::size_t max_length = 60) {
+    if (text.empty()) {
+        return "";
+    }
+
+    std::string preview;
+    preview.reserve(std::min(text.size(), max_length));
+    std::size_t count = 0;
+    for (unsigned char ch : text) {
+        if (count >= max_length) {
+            break;
+        }
+        if (ch == '\n' || ch == '\r' || ch == '\t') {
+            preview.push_back(' ');
+        } else if (std::isprint(ch)) {
+            preview.push_back(static_cast<char>(ch));
+        } else {
+            preview += "?";
+        }
+        ++count;
+    }
+
+    if (text.size() > max_length) {
+        preview += "...";
+    }
+
+    return preview;
+}
+
+std::string load_file_contents(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Не удалось открыть файл: " + path);
+    }
+
+    std::string data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (!file.good() && !file.eof()) {
+        throw std::runtime_error("Ошибка чтения файла: " + path);
+    }
+    return data;
+}
+
+using AlgorithmMap = std::map<int, std::tuple<std::string, std::function<std::string(const std::string&)>>>;
+
+void show_status(const AlgorithmMap& algorithms,
+                 int selected_algorithm,
+                 bool data_available,
+                 bool data_from_file,
+                 const std::string& data_preview,
+                 const std::string& file_path,
+                 std::size_t data_size) {
+    std::cout << "==============================\n";
+    std::cout << "Текущий алгоритм: ";
+    if (selected_algorithm == 0) {
+        std::cout << "не выбран";
+    } else {
+        const auto it = algorithms.find(selected_algorithm);
+        if (it != algorithms.end()) {
+            std::cout << std::get<0>(it->second);
+        } else {
+            std::cout << "неизвестно";
+        }
+    }
+    std::cout << "\n";
+
+    std::cout << "Источник данных: ";
+    if (!data_available) {
+        std::cout << "не задан";
+    } else if (data_from_file) {
+        std::cout << "файл (" << file_path << ", " << data_size << " байт)";
+    } else {
+        std::cout << "текст (" << data_size << " символов)";
+        if (!data_preview.empty()) {
+            std::cout << "\nПредпросмотр: " << data_preview;
+        }
+    }
+    std::cout << "\n==============================\n";
+}
+
 void show_menu() {
-    std::cout << "Выберите алгоритм хеширования:\n";
-    std::cout << "1. MD5\n";
-    std::cout << "2. SHA-1\n";
-    std::cout << "3. ГОСТ Р 34.11-2012 (Стрибог-256)\n";
+    std::cout << "Выберите действие:\n";
+    std::cout << "1. Выбрать алгоритм\n";
+    std::cout << "2. Ввести текст\n";
+    std::cout << "3. Загрузить файл\n";
+    std::cout << "4. Выполнить хеширование\n";
     std::cout << "0. Выход\n";
-    std::cout << "Введите номер: ";
+    std::cout << "Введите номер действия: ";
 }
 
 int main() {
-    std::unordered_map<int, std::tuple<std::string, std::function<std::string(const std::string&)>>> algorithms = {
+    AlgorithmMap algorithms = {
         {1, {"MD5", MD5::hash}},
         {2, {"SHA-1", SHA1::hash}},
         {3, {"ГОСТ Р 34.11-2012 (256 бит)", Streebog256::hash}}
     };
 
+    int selected_algorithm = 0;
+    std::string data;
+    bool data_available = false;
+    bool data_from_file = false;
+    std::string current_file_path;
+
     while (true) {
+        const std::string preview = (data_available && !data_from_file) ? make_preview(data) : std::string();
+        show_status(algorithms, selected_algorithm, data_available, data_from_file, preview, current_file_path, data.size());
         show_menu();
 
         int choice = 0;
@@ -492,24 +584,82 @@ int main() {
             break;
         }
 
-        auto it = algorithms.find(choice);
-        if (it == algorithms.end()) {
-            std::cout << "Неизвестный выбор. Попробуйте снова.\n\n";
-            continue;
-        }
+        switch (choice) {
+            case 1: {
+                std::cout << "Доступные алгоритмы:\n";
+                for (const auto& [id, info] : algorithms) {
+                    std::cout << "  " << id << ". " << std::get<0>(info) << '\n';
+                }
+                std::cout << "Введите номер алгоритма: ";
+                int algorithm_choice = 0;
+                if (!(std::cin >> algorithm_choice)) {
+                    std::cerr << "Некорректный ввод.\n";
+                    return 1;
+                }
+                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
-        std::cout << "Введите строку для хеширования: ";
-        std::string input;
-        std::getline(std::cin, input);
+                if (algorithms.find(algorithm_choice) != algorithms.end()) {
+                    selected_algorithm = algorithm_choice;
+                    std::cout << "Алгоритм установлен.\n\n";
+                } else {
+                    std::cout << "Алгоритм с таким номером не найден.\n\n";
+                }
+                break;
+            }
+            case 2: {
+                std::cout << "Введите текст для хеширования:\n";
+                std::string input;
+                std::getline(std::cin, input);
+                data = input;
+                data_available = true;
+                data_from_file = false;
+                current_file_path.clear();
+                std::cout << "Текст добавлен.\n\n";
+                break;
+            }
+            case 3: {
+                std::cout << "Укажите путь к файлу: ";
+                std::string path;
+                std::getline(std::cin, path);
+                try {
+                    data = load_file_contents(path);
+                    data_available = true;
+                    data_from_file = true;
+                    current_file_path = path;
+                    std::cout << "Файл успешно загружен.\n\n";
+                } catch (const std::exception& ex) {
+                    std::cerr << ex.what() << "\n\n";
+                }
+                break;
+            }
+            case 4: {
+                if (selected_algorithm == 0) {
+                    std::cout << "Сначала выберите алгоритм.\n\n";
+                    break;
+                }
+                if (!data_available) {
+                    std::cout << "Нет данных для хеширования.\n\n";
+                    break;
+                }
 
-        const auto& algorithm = it->second;
-        const std::string& title = std::get<0>(algorithm);
-        const auto& func = std::get<1>(algorithm);
-        try {
-            std::string digest = func(input);
-            std::cout << title << ": " << digest << "\n\n";
-        } catch (const std::exception& ex) {
-            std::cerr << "Ошибка: " << ex.what() << "\n\n";
+                const auto it = algorithms.find(selected_algorithm);
+                if (it == algorithms.end()) {
+                    std::cerr << "Выбранный алгоритм недоступен.\n\n";
+                    break;
+                }
+
+                const auto& [title, func] = it->second;
+                try {
+                    std::string digest = func(data);
+                    std::cout << title << ": " << digest << "\n\n";
+                } catch (const std::exception& ex) {
+                    std::cerr << "Ошибка: " << ex.what() << "\n\n";
+                }
+                break;
+            }
+            default:
+                std::cout << "Неизвестная команда. Попробуйте снова.\n\n";
+                break;
         }
     }
 
